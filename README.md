@@ -336,21 +336,21 @@ Ini adalah inti dari asinkronisasi antarmuka. Kita memicu "pekerja pendengar" (p
 Sementara "pekerja" itu sibuk mendengarkan server di background, program utama (while(1)) hanya diam menunggu Anda selesai mengetik satu baris kalimat (fgets) lalu mengirimkannya. Jika Anda mengetik /exit, loop ini akan dihancurkan (break) dan program selesai.
 
 #### Output
-1. Wired
+1. Wired  
 ![wired](/assets/soal1/wired.png)
-2. Navi
+2. Navi  
 ![navi](/assets/soal1/navi.png)
-3. Chatting
+3. Chatting  
 ![chat](/assets/soal1/chat.png)
-4. Jika memasukan nama yang sama di navi
+4. Jika memasukan nama yang sama di navi  
 ![sameName](/assets/soal1/sameName.png)
-5. Exit dengan /exit dan ctrl+c
-![exit](/assets/soal1/exit.png)
+5. Exit dengan /exit dan ctrl+c  
+![exit](/assets/soal1/exit.png)  
 ![ctrlC](/assets/soal1/controlC.png)
-6. Knights dan mematikan server
-![knights](/assets/soal1/knights.png)
+6. Knights dan mematikan server  
+![knights](/assets/soal1/knights.png)  
 ![wiredKilled](/assets/soal1/wiredMati.png)
-7. history
+7. history  
 ![history](/assets/soal1/history.png)
 
 #### Bug dan Kendala
@@ -840,21 +840,21 @@ nt main() {
 ```
 Bagian main() dari program bertindak sebagai pintu masuk dari interaksi IPC. Proses pendaftaran akun (Register) maupun pendaftaran login selalu menggunakan kunci pengaman sem_wait() dan sem_post(). Sebagai langkah penjamin integritas data tambahan, fase verifikasi memeriksa kecocokan tidak hanya antara kombinasi nama sandi tetapi juga meninjau variabel is_logged_in. Langkah krusial ini menghindarkan eksploitasi multi-terminal dengan akun tunggal.
 #### Output
-1. Make file
+1. Make file  
 ![make](/assets/soal2/make.png)
-2. Orion
+2. Orion  
 ![orion](/assets/soal2/orion.png)
-3. Eternal
+3. Eternal  
 ![Eternal](/assets/soal2/eternal.png)
-4. Regist & Login
-![Regis](/assets/soal2/register.png)
+4. Regist & Login  
+![Regis](/assets/soal2/register.png)  
 ![Login](/assets/soal2/login.png)
-5. Main Menu
+5. Main Menu  
 ![Main Menu](/assets/soal2/mainMenu.png)
-6. PVP & PVE
-![PVP](/assets/soal2/pvp.png)
+6. PVP & PVE  
+![PVP](/assets/soal2/pvp.png)  
 ![PVE](/assets/soal2/pve.png)
-7. Armory
+7. Armory  
 ![Armory](/assets/soal2/armory.png)
-8. History
+8. History  
 ![history](/assets/soal2/history.png)
