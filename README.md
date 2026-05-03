@@ -358,3 +358,26 @@ Terdapat sebuah bug dimana saat mengetikan command yang ke 2 untuk admin, tulisa
 Pada line ke 46 di navi.c, terdapat syntax error karena typo di akhir line yang secara tidak sengaja tertambah karakte ' - ' yang menyebabkan file tidak dapat dicompile
 
 ### Soal 2
+Pada soal kedua ini, kami diminta untuk membuat sebuah sistem permainan pertempuran berbasis client-server bernama "Battle Eterion". Program ini sangat bergantung pada konsep Inter-Process Communication (IPC) menggunakan Shared Memory untuk berbagi data antar proses secara global, serta menggunakan Semaphore (Mutex) untuk mencegah terjadinya Race Condition saat beberapa klien mengakses data secara bersamaan. Selain itu, sistem pertempuran mewajibkan proses berjalan secara real-time (asynchronous), sehingga kami harus memanipulasi mode terminal.
+
+```file
+CC = gcc
+CFLAGS = -Wall -pthread
+LDFLAGS = -lrt
+
+all: server client
+
+server: orion.c arena.h
+	$(CC) $(CFLAGS) orion.c -o orion $(LDFLAGS)
+
+client: eternal.c arena.h
+	$(CC) $(CFLAGS) eternal.c -o eternal $(LDFLAGS)
+
+clean:
+	rm -f orion eternal
+
+clear_ipc:
+	ipcs -m | grep 0x00001234 | awk '{print $$2}' | xargs -r ipcrm -m
+	ipcs -q | grep 0x00005678 | awk '{print $$2}' | xargs -r ipcrm -q
+	ipcs -s | grep 0x00009012 | awk '{print $$2}' | xargs -r ipcrm -s
+```
