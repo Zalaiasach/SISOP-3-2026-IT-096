@@ -359,7 +359,7 @@ Pada line ke 46 di navi.c, terdapat syntax error karena typo di akhir line yang 
 
 ### Soal 2
 Pada soal kedua ini, kami diminta untuk membuat sebuah sistem permainan pertempuran berbasis client-server bernama "Battle Eterion". Program ini sangat bergantung pada konsep Inter-Process Communication (IPC) menggunakan Shared Memory untuk berbagi data antar proses secara global, serta menggunakan Semaphore (Mutex) untuk mencegah terjadinya Race Condition saat beberapa klien mengakses data secara bersamaan. Selain itu, sistem pertempuran mewajibkan proses berjalan secara real-time (asynchronous), sehingga kami harus memanipulasi mode terminal.
-
+#### Makefile
 ```file
 CC = gcc
 CFLAGS = -Wall -pthread
@@ -381,3 +381,480 @@ clear_ipc:
 	ipcs -q | grep 0x00005678 | awk '{print $$2}' | xargs -r ipcrm -q
 	ipcs -s | grep 0x00009012 | awk '{print $$2}' | xargs -r ipcrm -s
 ```
+File ini digunakan untuk mempermudah proses kompilasi orion.c (server) dan eternal.c (client). Opsi -pthread dan -lrt wajib disertakan agar library untuk multithreading dan shared memory dapat berfungsi. Bagian terpenting di sini adalah clear_ipc. Saat program dihentikan secara paksa, memori bersama (shared memory) seringkali masih tersandera di RAM komputer. Perintah ini berfungsi untuk mencari ID memori berdasarkan key 0x00001234 dan menghapusnya dari sistem operasi menggunakan ipcrm.
+
+#### arena.h
+```c
+#ifndef ARENA_H
+#define ARENA_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <semaphore.h>
+#include <stdbool.h>
+
+#define SHM_KEY 0x00001234
+#define MAX_USERS 100
+#define MAX_HISTORY 50
+
+typedef struct {
+    char time_str[20];
+    char opponent[50];
+    char result[10]; 
+    int xp_gained;
+} History;
+
+typedef struct {
+    char username[50];
+    char password[50];
+    int gold;
+    int lvl;
+    int xp;
+    int weapon_bonus_dmg; 
+    bool is_logged_in;
+    bool is_matchmaking;
+    int opponent_idx;
+    int current_hp;
+    History match_history[MAX_HISTORY];
+    int history_count;
+} User;
+
+typedef struct {
+    sem_t mutex;
+    bool orion_ready;
+    User users[MAX_USERS];
+    int user_count;
+} SharedData;
+
+#endif
+```
+File ini bertindak sebagai kerangka data utama. SharedData adalah struktur yang nantinya akan dipetakan (di-mapping) ke dalam Shared Memory. Di dalamnya terdapat sem_t mutex yang bertindak sebagai gembok digital. Semua data pemain, mulai dari kredensial login, status (Gold, XP, Level, HP), hingga riwayat pertandingan (History) disimpan di dalam array users agar bisa diakses oleh program manapun yang terhubung ke memori tersebut.
+#### orion.c
+```c
+#include "arena.h"
+
+int main() {
+    int shmid = shmget(SHM_KEY, sizeof(SharedData), IPC_CREAT | 0666);
+    if (shmid < 0) {
+        perror("shmget failed");
+        exit(1);
+    }
+
+    SharedData *shm = (SharedData *)shmat(shmid, NULL, 0);
+
+    sem_init(&shm->mutex, 1, 1);
+    
+    shm->orion_ready = true;
+    shm->user_count = 0; 
+
+    printf("Orion is ready (PID: %d)\n", getpid());
+
+    while (1) {
+        sleep(1);
+    }
+
+    shmdt(shm);
+    return 0;
+}
+```
+orion.c bertindak sebagai server atau penyedia lapak. Program ini meminta alokasi memori ke sistem operasi menggunakan shmget dengan ukuran sebesar struct SharedData. Kemudian ia menempelkan memori tersebut ke prosesnya dengan shmat. Server ini menginisialisasi nilai awal mutex menjadi 1 (terbuka) agar siap digunakan klien. Setelah mengatur status orion_ready menjadi true, server akan masuk ke mode daemon (berjalan di background menggunakan while(1)) dan membiarkan klien (eternal) saling berinteraksi lewat memori tersebut.
+#### eternal.c
+```c
+void set_nonblocking_mode() {
+    struct termios ttystate;
+    tcgetattr(STDIN_FILENO, &ttystate);
+    ttystate.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+}
+void reset_terminal_mode() {
+    struct termios ttystate;
+    tcgetattr(STDIN_FILENO, &ttystate);
+    ttystate.c_lflag |= ICANON | ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
+}
+```
+Fungsi ini adalah kunci utama agar pertempuran bisa berjalan asinkron (real-time). Secara bawaan, terminal Linux berada di canonical mode yang akan memblokir (pause) eksekusi program sampai pengguna menekan Enter. Dengan memanipulasi termios dan mengubah properti sistem menggunakan fcntl menjadi O_NONBLOCK, program bisa membaca ketikan keyboard secara instan tanpa menghentikan berjalannya pertempuran.
+```c
+void update_stats(SharedData *shm, int idx) {
+    shm->users[idx].lvl = (shm->users[idx].xp / 100) + 1;
+}
+
+void render_battle(char *my_name, int my_hp, int my_max, char *en_name, int en_hp, int en_max) {
+    clear_screen();
+    printf("--- ARENA ---\n\n");
+    printf("%s\n[%d / %d]\n\n", my_name, my_hp > 0 ? my_hp : 0, my_max);
+    printf("     VS     \n\n");
+    printf("%s\n[%d / %d]\n\n", en_name, en_hp > 0 ? en_hp : 0, en_max);
+    printf("Combat Log:\n> Tekan 'a' atau 'u'.\n");
+}
+```
+Fungsi update_stats() memastikan bahwa perhitungan level pemain selalu termutakhir berdasarkan akumulasi Experience Points (XP) mereka. Level bertambah satu untuk setiap kelipatan 100 XP.
+Fungsi render_battle() digunakan untuk menggambar ulang (re-draw) antarmuka Arena di terminal. Fungsi ini mencetak nama, Health Points (HP) saat ini, dan kapasitas HP maksimal. Jika HP menyentuh angka minus, fungsi ini akan mencegahnya tercetak di bawah nol dengan operator ternary my_hp > 0 ? my_hp : 0.
+```c
+void start_battle(SharedData *shm, int my_idx) {
+    clear_screen();
+    printf("Searching for an opponent...\n");
+
+    update_stats(shm, my_idx);
+    int my_max_hp = 100 + (shm->users[my_idx].xp / 10);
+    int my_dmg = 10 + (shm->users[my_idx].xp / 50) + shm->users[my_idx].weapon_bonus_dmg;
+    
+    sem_wait(&shm->mutex);
+    shm->users[my_idx].current_hp = my_max_hp;
+    shm->users[my_idx].opponent_idx = -1;
+    shm->users[my_idx].is_matchmaking = true;
+    sem_post(&shm->mutex);
+
+    int opponent_idx = -1;
+    for (int i = 0; i < 35; i++) {
+        sem_wait(&shm->mutex);
+        if (shm->users[my_idx].opponent_idx != -1) {
+            opponent_idx = shm->users[my_idx].opponent_idx;
+            sem_post(&shm->mutex);
+            break;
+        }
+
+        for (int j = 0; j < shm->user_count; j++) {
+            if (j != my_idx && shm->users[j].is_matchmaking) {
+                shm->users[j].is_matchmaking = false;
+                shm->users[j].opponent_idx = my_idx;
+                shm->users[my_idx].is_matchmaking = false;
+                shm->users[my_idx].opponent_idx = j;
+                opponent_idx = j;
+                break;
+            }
+        }
+        sem_post(&shm->mutex);
+
+        if (opponent_idx != -1) break;
+        printf("Searching... [%d s]\n", 35 - i);
+        sleep(1);
+    }
+```
+Fungsi start_battle() menangani keseluruhan fase pencarian lawan dan pertempuran itu sendiri. Sebelum memulai pencarian, program mengatur status kesiapan bertarung pemain ke is_matchmaking = true.
+Kemudian, program memasuki loop pencarian (matchmaking) berdurasi maksimum 35 detik (sleep(1) diulang 35 kali). Pada setiap detiknya, klien mengunci Shared Memory menggunakan sem_wait() dan mengecek array users. Jika ditemukan pengguna lain yang juga berstatus is_matchmaking, mereka akan "dikaitkan". Indeks memori dari pengguna lawan akan disimpan ke variabel opponent_idx masing-masing, dan status pencarian keduanya dicabut agar tidak ditemukan oleh pemain ketiga. Jika selama 35 detik berlalu tidak ada yang dikaitkan, variabel opponent_idx akan tetap bernilai -1, yang berarti klien tersebut akan dipasangkan dengan bot (Monster).
+```c
+bool is_bot = (opponent_idx == -1);
+    
+    char enemy_name[50];
+    int enemy_max_hp, enemy_dmg;
+    int bot_hp = 0;
+
+    if (is_bot) {
+        strcpy(enemy_name, "Monster (Bot)");
+        enemy_max_hp = 50;
+        enemy_dmg = 5;
+        bot_hp = enemy_max_hp;
+    } else {
+        strcpy(enemy_name, shm->users[opponent_idx].username);
+        enemy_max_hp = 100 + (shm->users[opponent_idx].xp / 10);
+    }
+
+    set_nonblocking_mode();
+    tcflush(STDIN_FILENO, TCIFLUSH);
+    ```
+Setelah fase matchmaking selesai, sistem akan mengalkulasi statistik lawan. Jika musuhnya adalah bot, atributnya telah ditentukan dengan spesifikasi yang lebih lemah (HP 50, Damage 5). Jika melawan pemain asli, kapasitas nyawa (Max HP) lawan dihitung secara dinamis dari rumus dasar (100) ditambah sepuluh persen dari total XP mereka.
+Selanjutnya, mode terminal non-blocking diaktifkan. Fungsi tcflush() juga dipanggil untuk membuang antrean buffer keyboard yang mungkin tidak sengaja tertekan selama pemain menunggu di menu matchmaking, mencegah eksekusi perintah tak terduga.
+```c
+ while (battle_running) {
+        char input;
+        time_t current_time = time(NULL);
+        
+        int current_enemy_hp = is_bot ? bot_hp : shm->users[opponent_idx].current_hp;
+        
+        if (shm->users[my_idx].current_hp <= 0) {
+            battle_running = false;
+            is_win = false;
+            break;
+        }
+        
+        if (current_enemy_hp <= 0) {
+            battle_running = false;
+            is_win = true;
+            break;
+        }
+
+        if (shm->users[my_idx].current_hp != last_known_hp) {
+            last_known_hp = shm->users[my_idx].current_hp;
+            render_battle(shm->users[my_idx].username, shm->users[my_idx].current_hp, my_max_hp, enemy_name, current_enemy_hp, enemy_max_hp);
+        }
+```
+Ini adalah inti asinkronisasi sistem pertempuran. Program berputar dalam sebuah loop (while (battle_running)). Pada setiap siklusnya, ia mengambil waktu aktual sistem dan memantau status HP pemain serta lawannya. Jika HP siapa pun menyentuh nol, loop dihentikan secara prematur dengan status Win atau Loss yang relevan.
+Sistem juga memiliki mekanisme refresh yang optimal: layar terminal tidak selalu diperbarui secara paksa (flickering). Klien hanya akan memanggil render_battle() jika current_hp pemain berubah secara signifikan dari pemeriksaan terakhir mereka (last_known_hp), menandakan mereka baru saja terkena serangan.
+```c
+if (is_bot && current_time - last_bot_attack >= 2) {
+            sem_wait(&shm->mutex);
+            shm->users[my_idx].current_hp -= enemy_dmg;
+            sem_post(&shm->mutex);
+            last_bot_attack = current_time;
+        }
+
+        if (read(STDIN_FILENO, &input, 1) > 0) {
+            if ((input == 'a' || input == 'u') && current_time - last_attack >= 1) {
+                int dmg_dealt = my_dmg;
+                
+                if (input == 'u') {
+                    if (shm->users[my_idx].weapon_bonus_dmg > 0) {
+                        dmg_dealt = my_dmg * 3;
+                    } else {
+                        dmg_dealt = 0; 
+                    }
+                }
+
+                if (dmg_dealt > 0) {
+                    if (is_bot) {
+                        bot_hp -= dmg_dealt;
+                    } else {
+                        sem_wait(&shm->mutex);
+                        shm->users[opponent_idx].current_hp -= dmg_dealt;
+                        sem_post(&shm->mutex);
+                    }
+                    last_attack = current_time;
+                    render_battle(shm->users[my_idx].username, shm->users[my_idx].current_hp, my_max_hp, enemy_name, is_bot ? bot_hp : shm->users[opponent_idx].current_hp, enemy_max_hp);
+                }
+            }
+        }
+        usleep(50000); 
+    }
+```
+Karena bot tidak dikendalikan oleh program klien independen lain, logika serangan bot disematkan langsung di dalam loop ini. Jika durasi dari serangan bot terakhir telah melebihi dua detik, bot akan secara mandiri mengunci Shared Memory dan merusak (-=) HP pemain.
+Sistem input pemain bergantung pada fungsi read(). Meskipun diletakkan di non-blocking mode, jika ada karakter yang berhasil masuk (seperti menekan tombol 'a' atau 'u'), fungsi akan mengeksekusi validasi cooldown 1 detik. Jika cooldown terpenuhi, sistem akan memperhitungkan damage yang dihasilkan. Serangan Ultimate (u) hanya akan berfungsi dan memberikan damage 3 kali lipat jika pemain sudah membeli setidaknya satu senjata dari Armory (weapon_bonus_dmg > 0). Terakhir, usleep(50000) memberikan sedikit jeda istirahat bagi CPU agar looping tiada henti ini tidak menghabiskan terlalu banyak memori operasional.
+```c
+ int hc = shm->users[my_idx].history_count;
+    if (hc >= MAX_HISTORY) {
+        for (int i = 1; i < MAX_HISTORY; i++) {
+            shm->users[my_idx].match_history[i-1] = shm->users[my_idx].match_history[i];
+        }
+        hc = MAX_HISTORY - 1;
+    }
+
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    strftime(shm->users[my_idx].match_history[hc].time_str, sizeof(shm->users[my_idx].match_history[hc].time_str), "%H:%M:%S", tm);
+    strcpy(shm->users[my_idx].match_history[hc].opponent, enemy_name);
+
+    if (is_win) {
+        printf("VICTORY!\n");
+        shm->users[my_idx].xp += 50;
+        shm->users[my_idx].gold += 120;
+        strcpy(shm->users[my_idx].match_history[hc].result, "WIN");
+        shm->users[my_idx].match_history[hc].xp_gained = 50;
+    } else {
+        printf("DEFEAT!\n");
+        shm->users[my_idx].xp += 15;
+        shm->users[my_idx].gold += 30;
+        strcpy(shm->users[my_idx].match_history[hc].result, "LOSS");
+        shm->users[my_idx].match_history[hc].xp_gained = 15;
+    }
+ ```
+Ketika loop terhenti, mode non-blocking terminal dimatikan dan semua sisa spam tombol dari pengguna dibersihkan. Kemudian, sistem akan mencatat hasil pertempuran ke dalam array History di memori bersama.
+Jika catatan riwayat sudah melebihi kuota maksimum (MAX_HISTORY), fungsi ini akan secara cerdas menggeser setiap elemen array satu indeks ke bawah, menghapus catatan paling lawas agar ada ruang untuk entri riwayat baru. Setelah fungsi Library C Time (strftime) berhasil memformat stempel waktu (timestamp), sistem mengevaluasi boolean is_win. Pemenang akan dihadiahi 50 XP dan 120 Gold, sementara pemain yang kalah mendapatkan consolation prize sebesar 15 XP dan 30 Gold. Seluruh hadiah ini, beserta hasil dan stempel waktunya, akan disimpan dengan aman di dalam Shared Memory.
+```c
+void open_armory(SharedData *shm, int my_idx) {
+    int choice;
+    while(1) {
+        clear_screen();
+        printf("--- ARMORY ---\n");
+        
+        sem_wait(&shm->mutex);
+        int current_gold = shm->users[my_idx].gold;
+        sem_post(&shm->mutex);
+
+        printf("Gold: %d\n", current_gold);
+        printf("1. Wood Sword   |  100 G |   +5 Dmg\n");
+        printf("2. Iron Sword   |  300 G |  +15 Dmg\n");
+        printf("3. Steel Axe    |  600 G |  +30 Dmg\n");
+        printf("4. Demon Blade  | 1500 G |  +60 Dmg\n");
+        printf("5. God Slayer   | 5000 G | +150 Dmg\n");
+        printf("0. Back | Choice: ");
+
+        if (scanf("%d", &choice) != 1) {
+            while(getchar() != '\n');
+            continue;
+        }
+
+        if (choice == 0) break;
+
+        int price = 0, bonus = 0;
+        if (choice == 1) { price = 100; bonus = 5; }
+        else if (choice == 2) { price = 300; bonus = 15; }
+        else if (choice == 3) { price = 600; bonus = 30; }
+        else if (choice == 4) { price = 1500; bonus = 60; }
+        else if (choice == 5) { price = 5000; bonus = 150; }
+        else continue;
+
+        sem_wait(&shm->mutex);
+        if (shm->users[my_idx].gold >= price) {
+            shm->users[my_idx].gold -= price;
+            if (bonus > shm->users[my_idx].weapon_bonus_dmg) {
+                shm->users[my_idx].weapon_bonus_dmg = bonus;
+            }
+            printf("Pembelian berhasil!\n");
+        } else {
+            printf("Gold tidak cukup!\n");
+        }
+        sem_post(&shm->mutex);
+        
+        sleep(1);
+    }
+}
+```
+Fungsi open_armory menghadirkan sistem perbelanjaan di mana pemain dapat memperkuat serangannya. Dalam fungsi ini, klien memeriksa dompet Gold dari Shared Memory. Sistem Semaphore Mutex kembali digunakan untuk menjamin bahwa transaksi tidak dimanipulasi oleh konflik baca/tulis memori. Jika dana cukup, saldo pemain dipotong sebesar harga, dan kekuatan damage senjata baru dimasukkan ke weapon_bonus_dmg. Secara spesifik, program dirancang hanya menimpa variabel jika nilai bonus senjata yang baru dibeli lebih tinggi dari senjata yang sedang digunakan; dengan demikian, status tidak menurun kembali jika seseorang tak sengaja membeli senjata rendahan.
+```c
+void view_history(SharedData *shm, int my_idx) {
+    clear_screen();
+    printf("--- MATCH HISTORY ---\n\n");
+    printf("%-10s | %-15s | %-6s | %-5s\n", "Time", "Opponent", "Result", "XP");
+    printf("--------------------------------------------------\n");
+
+    sem_wait(&shm->mutex);
+    int hc = shm->users[my_idx].history_count;
+    if (hc == 0) {
+        printf("Belum ada histori pertempuran.\n");
+    } else {
+        for (int i = hc - 1; i >= 0; i--) {
+            printf("%-10s | %-15s | %-6s | +%-4d\n", 
+                shm->users[my_idx].match_history[i].time_str,
+                shm->users[my_idx].match_history[i].opponent,
+                shm->users[my_idx].match_history[i].result,
+                shm->users[my_idx].match_history[i].xp_gained);
+        }
+    }
+    sem_post(&shm->mutex);
+
+    printf("\nPress [Enter] to back...\n");
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF);
+    getchar();
+}
+```
+Fungsi terakhir, view_history(), memberikan representasi visual dari riwayat yang telah diarsip di dalam Shared Memory pascapertempuran. Iterasinya diatur untuk berjalan mundur (for (int i = hc - 1; i >= 0; i--)) agar catatan yang paling baru dimainkan selalu tercetak di bagian paling atas tampilan riwayat. Ini meningkatkan tingkat navigasi dan kenyamanan pengguna secara signifikan.
+```c
+nt main() {
+    int shmid = shmget(SHM_KEY, sizeof(SharedData), 0666);
+    if (shmid < 0) exit(1);
+
+    SharedData *shm = (SharedData *)shmat(shmid, NULL, 0);
+    if (!shm->orion_ready) exit(1);
+
+    int choice;
+    while (1) {
+        clear_screen();
+        printf("1. Register\n2. Login\n3. Exit\nChoice: ");
+        if (scanf("%d", &choice) != 1) {
+            while(getchar() != '\n'); 
+            continue;
+        }
+
+        if (choice == 1) {
+            char uname[50], pass[50];
+            printf("Username: ");
+            scanf("%s", uname);
+            printf("Password: ");
+            scanf("%s", pass);
+
+            sem_wait(&shm->mutex);
+            bool exists = false;
+            for (int i = 0; i < shm->user_count; i++) {
+                if (strcmp(shm->users[i].username, uname) == 0) exists = true;
+            }
+
+            if (!exists && shm->user_count < MAX_USERS) {
+                int idx = shm->user_count;
+                strcpy(shm->users[idx].username, uname);
+                strcpy(shm->users[idx].password, pass);
+                shm->users[idx].gold = 150;
+                shm->users[idx].lvl = 1;
+                shm->users[idx].xp = 0;
+                shm->users[idx].weapon_bonus_dmg = 0;
+                shm->users[idx].is_logged_in = false;
+                shm->users[idx].is_matchmaking = false;
+                shm->users[idx].history_count = 0;
+                shm->user_count++;
+            }
+            sem_post(&shm->mutex);
+
+        } else if (choice == 2) {
+            char uname[50], pass[50];
+            printf("Username: ");
+            scanf("%s", uname);
+            printf("Password: ");
+            scanf("%s", pass);
+
+            int my_idx = -1;
+            sem_wait(&shm->mutex);
+            for (int i = 0; i < shm->user_count; i++) {
+                if (strcmp(shm->users[i].username, uname) == 0 && strcmp(shm->users[i].password, pass) == 0) {
+                    if (!shm->users[i].is_logged_in) {
+                        my_idx = i;
+                        shm->users[i].is_logged_in = true;
+                    }
+                    break;
+                }
+            }
+            sem_post(&shm->mutex);
+
+            if (my_idx >= 0) {
+                bool in_menu = true;
+                while (in_menu) {
+                    clear_screen();
+                    update_stats(shm, my_idx);
+                    printf("PROFILE: %s | Lvl: %d | XP: %d | Gold: %d\n", shm->users[my_idx].username, shm->users[my_idx].lvl, shm->users[my_idx].xp, shm->users[my_idx].gold);
+                    printf("1. Battle\n2. Armory\n3. History\n4. Logout\n> Choice: ");
+                    int sub_choice;
+                    if (scanf("%d", &sub_choice) != 1) {
+                        while(getchar() != '\n');
+                        continue;
+                    }
+
+                    if (sub_choice == 1) {
+                        start_battle(shm, my_idx);
+                    } else if (sub_choice == 2) {
+                        open_armory(shm, my_idx);
+                    } else if (sub_choice == 3) {
+                        view_history(shm, my_idx);
+                    } else if (sub_choice == 4) {
+                        sem_wait(&shm->mutex);
+                        shm->users[my_idx].is_logged_in = false;
+                        sem_post(&shm->mutex);
+                        in_menu = false;
+                    }
+                }
+            }
+        } else if (choice == 3) {
+            break;
+        }
+    }
+
+    shmdt(shm);
+    return 0;
+}
+```
+Bagian main() dari program bertindak sebagai pintu masuk dari interaksi IPC. Proses pendaftaran akun (Register) maupun pendaftaran login selalu menggunakan kunci pengaman sem_wait() dan sem_post(). Sebagai langkah penjamin integritas data tambahan, fase verifikasi memeriksa kecocokan tidak hanya antara kombinasi nama sandi tetapi juga meninjau variabel is_logged_in. Langkah krusial ini menghindarkan eksploitasi multi-terminal dengan akun tunggal.
+#### Output
+1. Make file
+![make](/assets/soal2/make.png)
+2. Orion
+![orion](/assets/soal2/orion.png)
+3. Eternal
+![Eternal](/assets/soal2/eternal.png)
+4. Regist & Login
+![Regis](/assets/soal2/register.png)
+![Login](/assets/soal2/login.png)
+5. Main Menu
+![Main Menu](/assets/soal2/mainMenu.png)
+6. PVP & PVE
+![PVP](/assets/soal2/pvp.png)
+![PVE](/assets/soal2/pve.png)
+7. Armory
+![Armory](/assets/soal2/armory.png)
+8. History
+![history](/assets/soal2/history.png)
